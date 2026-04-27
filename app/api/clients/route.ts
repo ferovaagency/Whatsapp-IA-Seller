@@ -21,16 +21,20 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const { name, business_name, email, phone, custom_prompt, plan } = body;
 
-  // Crear instancia en Evolution API
   const instanceName = `ferova_${Date.now()}`;
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
 
-  try {
-    await createInstance(instanceName);
-    await setWebhook(instanceName, `${appUrl}/api/webhook`);
-  } catch {
-    // Si Evolution no está disponible aún, continuar sin instancia
-  }
+  // Crear instancia en Evolution API sin bloquear — se hace en background
+  const setupEvolution = async () => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      await createInstance(instanceName);
+      await setWebhook(instanceName, `${appUrl}/api/webhook`);
+      clearTimeout(timer);
+    } catch { /* ignorar */ }
+  };
+  setupEvolution();
 
   const { data, error } = await supabaseAdmin
     .from("clients")

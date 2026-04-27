@@ -1,29 +1,22 @@
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
-let _admin: SupabaseClient | null = null;
-let _client: SupabaseClient | null = null;
-
-export function getSupabaseAdmin(): SupabaseClient {
-  if (!_admin) {
-    _admin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
-  }
-  return _admin;
+function getUrl() {
+  return process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 }
 
-export function getSupabase(): SupabaseClient {
-  if (!_client) {
-    _client = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-  }
-  return _client;
+function getServiceKey() {
+  return process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 }
 
-// Alias para compatibilidad
-export const supabaseAdmin = new Proxy({} as SupabaseClient, {
-  get: (_, prop) => getSupabaseAdmin()[prop as keyof SupabaseClient],
-});
+export function createSupabaseAdmin() {
+  const url = getUrl();
+  const key = getServiceKey();
+  if (!url) throw new Error("SUPABASE_URL env var not set");
+  if (!key) throw new Error("SUPABASE_SERVICE_ROLE_KEY env var not set");
+  return createClient(url, key);
+}
+
+export const supabaseAdmin = {
+  from: (table: string) => createSupabaseAdmin().from(table),
+  rpc: (fn: string, params?: Record<string, unknown>) => createSupabaseAdmin().rpc(fn, params),
+};

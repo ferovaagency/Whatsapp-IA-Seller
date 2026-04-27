@@ -280,22 +280,10 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
 
   return (
     <Modal onClose={onClose} title={`Conocimiento — ${client.business_name}`}>
-      <div className="space-y-5">
-        {/* URL */}
-        <div>
-          <label className="text-sm font-medium block mb-1">Sitio web del negocio</label>
-          <div className="flex gap-2">
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." className="flex-1 border rounded-lg px-3 py-2 text-sm" />
-            <button onClick={() => ingest("url")} disabled={!url || loading} className="bg-black text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">
-              Cargar
-            </button>
-          </div>
-          <p className="text-xs text-gray-400 mt-1">Extrae automáticamente el contenido del sitio</p>
-        </div>
-
-        {/* Archivo */}
-        <div>
-          <label className="text-sm font-medium block mb-1">Subir archivo</label>
+      <div className="space-y-4">
+        {/* Archivo — primera opción */}
+        <div className="bg-gray-50 rounded-xl p-4">
+          <p className="text-sm font-semibold mb-2">📎 Subir archivo (.txt o .pdf)</p>
           <input
             ref={fileRef}
             type="file"
@@ -306,23 +294,34 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
           <button
             onClick={() => fileRef.current?.click()}
             disabled={loading}
-            className="w-full border-2 border-dashed border-gray-300 rounded-lg py-3 text-sm text-gray-500 hover:border-gray-400 hover:bg-gray-50 disabled:opacity-50"
+            className="w-full border-2 border-dashed border-gray-300 rounded-lg py-4 text-sm text-gray-600 font-medium hover:border-black hover:bg-white disabled:opacity-50 transition-colors"
           >
-            📎 Seleccionar .txt o .pdf
+            {loading ? "Procesando archivo..." : "Clic aquí para seleccionar archivo"}
           </button>
-          <p className="text-xs text-gray-400 mt-1">El PDF se analiza automáticamente con IA</p>
+          <p className="text-xs text-gray-400 mt-1">Los PDFs se leen automáticamente con IA</p>
+        </div>
+
+        {/* URL */}
+        <div>
+          <p className="text-sm font-semibold mb-2">🌐 Cargar desde sitio web</p>
+          <div className="flex gap-2">
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." className="flex-1 border rounded-lg px-3 py-2 text-sm" />
+            <button onClick={() => ingest("url")} disabled={!url || loading} className="bg-black text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50">
+              {loading ? "..." : "Cargar"}
+            </button>
+          </div>
         </div>
 
         {/* Texto manual */}
         <div>
-          <label className="text-sm font-medium block mb-1">Pegar texto / información manual</label>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Horarios, precios, productos, políticas..." />
-          <button onClick={() => ingest("text")} disabled={!text || loading} className="mt-2 bg-black text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50 w-full">
-            {loading ? "Procesando..." : "Ingestar texto"}
+          <p className="text-sm font-semibold mb-2">📝 Pegar texto manual</p>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Horarios, precios, productos, políticas..." />
+          <button onClick={() => ingest("text")} disabled={!text || loading} className="mt-2 bg-black text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 w-full">
+            {loading ? "Procesando..." : "Guardar texto"}
           </button>
         </div>
 
-        {result && <p className="text-sm font-medium">{result}</p>}
+        {result && <p className="text-sm font-medium p-3 bg-gray-50 rounded-lg">{result}</p>}
 
         <div className="border-t pt-3">
           <button onClick={clearKnowledge} disabled={loading} className="text-xs text-red-500 hover:underline disabled:opacity-50">
@@ -421,45 +420,39 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
     e.preventDefault();
     setLoading(true);
     setError("");
-
-    const res = await fetch("/api/clients", {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({
-        name: form.name,
-        business_name: form.business_name,
-        email: form.email,
-        phone: form.phone,
-        custom_prompt: form.custom_prompt,
-        plan: form.plan,
-      }),
-    });
-
-    if (!res.ok) {
-      const data = await res.json();
-      setError(data.error || `Error ${res.status} — revisa que la contraseña admin sea correcta`);
-      setLoading(false);
-      return;
-    }
-
-    const client = await res.json();
-
-    // Si hay URL del sitio web, iniciar ingesta automática
-    if (form.website_url && client.id) {
-      fetch("/api/knowledge", {
+    try {
+      const res = await fetch("/api/clients", {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
-          client_id: client.id,
-          url: form.website_url,
-          source: form.website_url,
+          name: form.name,
+          business_name: form.business_name,
+          email: form.email,
+          phone: form.phone,
+          custom_prompt: form.custom_prompt,
+          plan: form.plan,
         }),
-      }).catch(() => {});
+      });
+      let data: Record<string, unknown> = {};
+      try { data = await res.json(); } catch { /* empty body */ }
+      if (!res.ok) {
+        setError(`Error ${res.status}: ${(data as {error?: string}).error ?? "Error del servidor"}`);
+        return;
+      }
+      if (form.website_url && (data as {id?: string}).id) {
+        fetch("/api/knowledge", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ client_id: (data as {id: string}).id, url: form.website_url, source: form.website_url }),
+        }).catch(() => {});
+      }
+      onCreated();
+      onClose();
+    } catch (err: unknown) {
+      setError(`Error de red: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
     }
-
-    onCreated();
-    onClose();
-    setLoading(false);
   }
 
   return (

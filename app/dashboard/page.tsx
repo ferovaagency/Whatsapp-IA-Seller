@@ -17,14 +17,14 @@ type Client = {
   created_at: string;
 };
 
+const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_SECRET || "ferova_admin_2026";
+
 function authHeaders() {
-  const secret = typeof window !== "undefined" ? localStorage.getItem("admin_secret") || "" : "";
-  return { "Content-Type": "application/json", Authorization: `Bearer ${secret}` };
+  return { "Content-Type": "application/json", Authorization: `Bearer ${ADMIN_KEY}` };
 }
 
 function fileAuthHeaders() {
-  const secret = typeof window !== "undefined" ? localStorage.getItem("admin_secret") || "" : "";
-  return { Authorization: `Bearer ${secret}` };
+  return { Authorization: `Bearer ${ADMIN_KEY}` };
 }
 
 export default function Dashboard() {
@@ -36,10 +36,6 @@ export default function Dashboard() {
   const [editModal, setEditModal] = useState<Client | null>(null);
 
   useEffect(() => {
-    if (!localStorage.getItem("admin_secret")) {
-      const secret = prompt("Contraseña de administrador:");
-      if (secret) localStorage.setItem("admin_secret", secret);
-    }
     loadClients();
   }, []);
 

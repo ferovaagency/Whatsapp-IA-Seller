@@ -23,9 +23,7 @@ export async function POST(req: NextRequest) {
 
   // Crear instancia en Evolution API
   const instanceName = `ferova_${Date.now()}`;
-  const appUrl = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : process.env.NEXT_PUBLIC_APP_URL || "";
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
 
   try {
     await createInstance(instanceName);

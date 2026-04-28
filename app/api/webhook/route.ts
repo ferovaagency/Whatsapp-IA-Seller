@@ -5,7 +5,7 @@ import { searchKnowledge } from "@/lib/knowledge/search";
 import { sendMessage, getMediaBase64 } from "@/lib/evolution/client";
 
 const HUMAN_SILENCE_MINUTES = 15;
-const BOT_DELAY_SECONDS = 4;
+const BOT_DELAY_SECONDS = 2;
 
 export async function POST(req: NextRequest) {
   try {
@@ -135,8 +135,12 @@ export async function POST(req: NextRequest) {
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-    // 7. Conocimiento relevante
-    const knowledge = await searchKnowledge(client.id, messageText);
+    // 7. Conocimiento relevante (solo si hay documentos cargados)
+    const { count } = await supabaseAdmin
+      .from("knowledge_base")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", client.id);
+    const knowledge = count && count > 0 ? await searchKnowledge(client.id, messageText) : "";
 
     // 8. Generar respuesta
     const systemPrompt = buildSystemPrompt(client, knowledge);

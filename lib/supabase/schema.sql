@@ -129,3 +129,17 @@ $$ language plpgsql;
 create trigger clients_updated_at
   before update on clients
   for each row execute function update_updated_at();
+
+-- ============================================================
+-- TABLA: problem_reports
+-- Reportes de problemas enviados desde el portal del cliente
+-- ============================================================
+create table if not exists problem_reports (
+  id uuid primary key default gen_random_uuid(),
+  client_id uuid references clients(id) on delete cascade,
+  description text not null,
+  resolved boolean default false,
+  created_at timestamptz default now()
+);
+
+alter table problem_reports enable row level security;

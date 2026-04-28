@@ -164,6 +164,12 @@ export default function Dashboard() {
                   <button onClick={() => showQR(c)} className="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">
                     📱 Conectar WhatsApp
                   </button>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/portal/${c.id}`); alert("Link copiado"); }}
+                    className="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50"
+                  >
+                    🔗 Copiar link portal
+                  </button>
                   <button onClick={() => setKnowledgeModal(c)} className="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">
                     🧠 Base de conocimiento
                   </button>

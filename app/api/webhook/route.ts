@@ -4,7 +4,7 @@ import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";
 import { sendMessage, getMediaBase64 } from "@/lib/evolution/client";
 
-const HUMAN_SILENCE_MINUTES = 15;
+const HUMAN_SILENCE_MINUTES = 5;
 const BOT_DELAY_SECONDS = 2;
 
 export async function POST(req: NextRequest) {

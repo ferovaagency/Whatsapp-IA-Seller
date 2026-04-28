@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQR, getInstanceStatus } from "@/lib/evolution/client";
+import { supabaseAdmin } from "@/lib/supabase/client";
 import { requireAdmin } from "@/lib/auth";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ instanceName: string }> }) {
@@ -11,7 +12,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
     const statusData = await getInstanceStatus(instanceName);
     const state = statusData?.instance?.state || statusData?.state;
 
-    // Instance doesn't exist in Evolution API yet
     if (!state || statusData?.error || statusData?.response?.message) {
       return NextResponse.json({
         qr: null,
@@ -21,6 +21,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
           : "La instancia aún no existe en Evolution API. Créala desde el manager.",
       }, { status: 404 });
     }
+
+    // Sync status to DB
+    const dbStatus = state === "open" ? "connected" : state === "connecting" ? "connecting" : "disconnected";
+    supabaseAdmin.from("clients").update({ instance_status: dbStatus }).eq("instance_name", instanceName);
 
     if (state === "open") {
       return NextResponse.json({ qr: null, status: "open" });

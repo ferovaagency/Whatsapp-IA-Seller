@@ -5,7 +5,7 @@ import { searchKnowledge } from "@/lib/knowledge/search";
 import { sendMessage } from "@/lib/evolution/client";
 
 const HUMAN_SILENCE_MINUTES = 15; // Si el dueño respondió hace menos de esto, la IA no habla
-const BOT_DELAY_SECONDS = 30;     // Segundos de espera antes de que la IA responda
+const BOT_DELAY_SECONDS = 4;      // Pausa breve antes de responder (evita timeout de Vercel)
 
 export async function POST(req: NextRequest) {
   try {

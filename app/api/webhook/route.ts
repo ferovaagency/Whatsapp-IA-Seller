@@ -13,7 +13,8 @@ export async function POST(req: NextRequest) {
 
     if (body.event !== "messages.upsert") return NextResponse.json({ ok: true });
 
-    const msg = body.data?.messages?.[0];
+    // Evolution API v2 sends data as single message object OR as messages array
+    const msg = body.data?.messages?.[0] ?? (body.data?.key ? body.data : null);
     if (!msg) return NextResponse.json({ ok: true });
 
     const instanceName = body.instance;

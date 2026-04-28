@@ -69,3 +69,12 @@ export async function deleteInstance(instanceName: string) {
   });
   return res.json();
 }
+
+export async function getMediaBase64(instanceName: string, message: unknown) {
+  const res = await fetch(`${BASE_URL}/chat/getBase64FromMediaMessage/${instanceName}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ message }),
+  });
+  return res.json();
+}

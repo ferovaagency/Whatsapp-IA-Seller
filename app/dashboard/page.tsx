@@ -75,10 +75,16 @@ export default function Dashboard() {
 
   async function showQR(client: Client) {
     setQrModal({ instanceName: client.instance_name, qr: null, status: "loading" });
-    const res = await fetch(`/api/qr/${client.instance_name}`, { headers: authHeaders() });
-    if (res.ok) {
+    try {
+      const res = await fetch(`/api/qr/${client.instance_name}`, { headers: authHeaders() });
       const data = await res.json();
-      setQrModal({ instanceName: client.instance_name, qr: data.qr, status: data.status });
+      if (res.ok) {
+        setQrModal({ instanceName: client.instance_name, qr: data.qr, status: data.status });
+      } else {
+        setQrModal({ instanceName: client.instance_name, qr: null, status: `error: ${data.error ?? res.status}` });
+      }
+    } catch {
+      setQrModal({ instanceName: client.instance_name, qr: null, status: "error: sin conexión" });
     }
   }
 

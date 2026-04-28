@@ -1,5 +1,5 @@
-const BASE_URL = process.env.EVOLUTION_API_URL || "";
-const API_KEY = process.env.EVOLUTION_API_KEY || "";
+const BASE_URL = (process.env.EVOLUTION_API_URL || "").trim().replace(/\/$/, "");
+const API_KEY = (process.env.EVOLUTION_API_KEY || "").trim();
 
 const headers = {
   "Content-Type": "application/json",

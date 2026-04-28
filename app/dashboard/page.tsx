@@ -31,7 +31,7 @@ export default function Dashboard() {
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [qrModal, setQrModal] = useState<{ instanceName: string; qr: string | null; status: string } | null>(null);
+  const [qrModal, setQrModal] = useState<{ instanceName: string; qr: string | null; status: string; detail?: string } | null>(null);
   const [knowledgeModal, setKnowledgeModal] = useState<Client | null>(null);
   const [editModal, setEditModal] = useState<Client | null>(null);
 
@@ -81,7 +81,7 @@ export default function Dashboard() {
       if (res.ok) {
         setQrModal({ instanceName: client.instance_name, qr: data.qr, status: data.status });
       } else {
-        setQrModal({ instanceName: client.instance_name, qr: null, status: `error: ${data.error ?? res.status}` });
+        setQrModal({ instanceName: client.instance_name, qr: null, status: data.status ?? "error", detail: data.detail ?? data.error });
       }
     } catch {
       setQrModal({ instanceName: client.instance_name, qr: null, status: "error: sin conexión" });
@@ -192,10 +192,25 @@ export default function Dashboard() {
             <p className="text-center py-8 text-gray-500">Generando QR...</p>
           ) : qrModal.qr ? (
             <img src={qrModal.qr} alt="QR WhatsApp" className="mx-auto w-64 h-64" />
+          ) : qrModal.status === "open" ? (
+            <p className="text-center py-8 text-green-600 font-medium">Ya conectado ✅</p>
+          ) : qrModal.status === "not_created" ? (
+            <div className="text-center py-6 space-y-3">
+              <p className="text-red-600 font-medium">Instancia no creada en Evolution API</p>
+              <p className="text-sm text-gray-500">{qrModal.detail}</p>
+              <a
+                href="https://evolution-api-production-0686.up.railway.app/manager/"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block mt-2 bg-black text-white text-sm px-4 py-2 rounded-lg"
+              >
+                Abrir Manager de Evolution API
+              </a>
+            </div>
           ) : (
             <p className="text-center py-8 text-gray-500">
               Estado: <strong>{qrModal.status}</strong>
-              {qrModal.status === "open" && " — Ya conectado ✅"}
+              {qrModal.detail && <span className="block text-xs text-red-500 mt-1">{qrModal.detail}</span>}
             </p>
           )}
           <button onClick={() => showQR({ instance_name: qrModal.instanceName } as Client)} className="w-full mt-4 border rounded-lg py-2 text-sm hover:bg-gray-50">

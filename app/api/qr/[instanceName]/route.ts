@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getQR, getInstanceStatus, createInstance, setWebhook } from "@/lib/evolution/client";
+import { getQR, getInstanceStatus } from "@/lib/evolution/client";
 import { requireAdmin } from "@/lib/auth";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ instanceName: string }> }) {
@@ -8,15 +8,18 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
   const { instanceName } = await params;
 
   try {
-    // Check if instance exists; if not, create it
     const statusData = await getInstanceStatus(instanceName);
     const state = statusData?.instance?.state || statusData?.state;
 
+    // Instance doesn't exist in Evolution API yet
     if (!state || statusData?.error || statusData?.response?.message) {
-      // Instance doesn't exist — create it and set webhook
-      await createInstance(instanceName);
-      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "";
-      if (appUrl) await setWebhook(instanceName, `${appUrl}/api/webhook`);
+      return NextResponse.json({
+        qr: null,
+        status: "not_created",
+        detail: Array.isArray(statusData?.response?.message)
+          ? statusData.response.message[0]
+          : "La instancia aún no existe en Evolution API. Créala desde el manager.",
+      }, { status: 404 });
     }
 
     if (state === "open") {
@@ -26,12 +29,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
     const qrData = await getQR(instanceName);
     const qr = qrData?.base64 || qrData?.qrcode?.base64 || qrData?.code?.base64 || null;
 
-    return NextResponse.json({
-      qr,
-      status: state || "connecting",
-    });
+    return NextResponse.json({ qr, status: state || "connecting" });
   } catch (err) {
     console.error("QR error:", err);
-    return NextResponse.json({ error: "Evolution API not available" }, { status: 503 });
+    return NextResponse.json({ error: String(err) }, { status: 503 });
   }
 }

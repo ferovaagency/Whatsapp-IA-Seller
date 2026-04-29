@@ -31,7 +31,7 @@ export default function Dashboard() {
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [qrModal, setQrModal] = useState<{ instanceName: string; qr: string | null; status: string; detail?: string } | null>(null);
+  const [qrModal, setQrModal] = useState<{ clientId: string; instanceName: string; qr: string | null; status: string; detail?: string } | null>(null);
   const [knowledgeModal, setKnowledgeModal] = useState<Client | null>(null);
   const [editModal, setEditModal] = useState<Client | null>(null);
 
@@ -73,18 +73,46 @@ export default function Dashboard() {
     loadClients();
   }
 
+  async function setupWebhook(client: Client) {
+    const res = await fetch(`/api/clients/${client.id}/webhook`, { method: "POST", headers: authHeaders() });
+    const data = await res.json();
+    if (res.ok) {
+      alert(`Webhook configurado correctamente.\nURL: ${data.webhookUrl}`);
+    } else {
+      alert(`Error al configurar webhook:\n${data.error}`);
+    }
+  }
+
   async function showQR(client: Client) {
-    setQrModal({ instanceName: client.instance_name, qr: null, status: "loading" });
+    setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: null, status: "loading" });
     try {
       const res = await fetch(`/api/qr/${client.instance_name}`, { headers: authHeaders() });
       const data = await res.json();
       if (res.ok) {
-        setQrModal({ instanceName: client.instance_name, qr: data.qr, status: data.status });
+        setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: data.qr, status: data.status });
       } else {
-        setQrModal({ instanceName: client.instance_name, qr: null, status: data.status ?? "error", detail: data.detail ?? data.error });
+        setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: null, status: data.status ?? "error", detail: data.detail ?? data.error });
       }
     } catch {
-      setQrModal({ instanceName: client.instance_name, qr: null, status: "error: sin conexión" });
+      setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: null, status: "error: sin conexión" });
+    }
+  }
+
+  async function createInstance(clientId: string, instanceName: string) {
+    setQrModal((prev) => prev ? { ...prev, status: "creating" } : null);
+    try {
+      const res = await fetch(`/api/clients/${clientId}/instance`, { method: "POST", headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) {
+        setQrModal((prev) => prev ? { ...prev, status: "error", detail: data.error } : null);
+        return;
+      }
+      // Instance created — now fetch QR
+      const qrRes = await fetch(`/api/qr/${instanceName}`, { headers: authHeaders() });
+      const qrData = await qrRes.json();
+      setQrModal((prev) => prev ? { ...prev, qr: qrData.qr ?? null, status: qrData.status ?? "connecting" } : null);
+    } catch (err) {
+      setQrModal((prev) => prev ? { ...prev, status: "error", detail: String(err) } : null);
     }
   }
 
@@ -176,6 +204,9 @@ export default function Dashboard() {
                   <button onClick={() => setEditModal(c)} className="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">
                     ✏️ Editar
                   </button>
+                  <button onClick={() => setupWebhook(c)} className="text-xs border border-blue-200 text-blue-600 rounded-lg px-3 py-1.5 hover:bg-blue-50">
+                    🔔 Webhook
+                  </button>
                   <button onClick={() => deleteClient(c)} className="text-xs border border-red-200 text-red-600 rounded-lg px-3 py-1.5 hover:bg-red-50">
                     🗑️ Eliminar
                   </button>
@@ -195,23 +226,24 @@ export default function Dashboard() {
         <Modal onClose={() => setQrModal(null)} title="Conectar WhatsApp">
           <p className="text-sm text-gray-600 mb-4">Escanea el QR desde el WhatsApp del cliente.</p>
           {qrModal.status === "loading" ? (
-            <p className="text-center py-8 text-gray-500">Generando QR...</p>
+            <p className="text-center py-8 text-gray-500">Verificando instancia...</p>
+          ) : qrModal.status === "creating" ? (
+            <p className="text-center py-8 text-gray-500">Creando instancia en Evolution API...</p>
           ) : qrModal.qr ? (
             <img src={qrModal.qr} alt="QR WhatsApp" className="mx-auto w-64 h-64" />
           ) : qrModal.status === "open" ? (
-            <p className="text-center py-8 text-green-600 font-medium">Ya conectado ✅</p>
+            <p className="text-center py-8 text-green-600 font-medium">Ya conectado</p>
           ) : qrModal.status === "not_created" ? (
             <div className="text-center py-6 space-y-3">
-              <p className="text-red-600 font-medium">Instancia no creada en Evolution API</p>
-              <p className="text-sm text-gray-500">{qrModal.detail}</p>
-              <a
-                href="https://evolution-api-production-0686.up.railway.app/manager/"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-block mt-2 bg-black text-white text-sm px-4 py-2 rounded-lg"
+              <p className="text-red-600 font-medium">Instancia no existe en Evolution API</p>
+              <p className="text-xs text-gray-400 font-mono">{qrModal.instanceName}</p>
+              <button
+                onClick={() => createInstance(qrModal.clientId, qrModal.instanceName)}
+                className="w-full bg-black text-white text-sm px-4 py-2.5 rounded-lg font-medium"
               >
-                Abrir Manager de Evolution API
-              </a>
+                Crear instancia ahora
+              </button>
+              {qrModal.detail && <p className="text-xs text-gray-400">{qrModal.detail}</p>}
             </div>
           ) : (
             <p className="text-center py-8 text-gray-500">
@@ -219,9 +251,11 @@ export default function Dashboard() {
               {qrModal.detail && <span className="block text-xs text-red-500 mt-1">{qrModal.detail}</span>}
             </p>
           )}
-          <button onClick={() => showQR({ instance_name: qrModal.instanceName } as Client)} className="w-full mt-4 border rounded-lg py-2 text-sm hover:bg-gray-50">
-            Actualizar QR
-          </button>
+          {!["loading", "creating", "not_created", "open"].includes(qrModal.status) && (
+            <button onClick={() => showQR({ id: qrModal.clientId, instance_name: qrModal.instanceName } as Client)} className="w-full mt-4 border rounded-lg py-2 text-sm hover:bg-gray-50">
+              Actualizar QR
+            </button>
+          )}
         </Modal>
       )}
 
@@ -442,11 +476,13 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [evolutionWarn, setEvolutionWarn] = useState("");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError("");
+    setEvolutionWarn("");
     try {
       const res = await fetch("/api/clients", {
         method: "POST",
@@ -466,6 +502,17 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
         setError(`Error ${res.status}: ${(data as {error?: string}).error ?? "Error del servidor"}`);
         return;
       }
+
+      // Mostrar advertencia si la instancia en Evolution API no se creó
+      const evo = data._evolution as { ok: boolean; status?: number; body?: unknown; error?: string } | undefined;
+      if (evo && !evo.ok) {
+        const detail = evo.error ?? JSON.stringify(evo.body);
+        setEvolutionWarn(`⚠️ Cliente creado, pero la instancia en Evolution API falló:\n${detail}\n\nUsa el botón "🔔 Webhook" e "🔧 Crear instancia" desde el dashboard.`);
+        setLoading(false);
+        onCreated();
+        return;
+      }
+
       if (form.website_url && (data as {id?: string}).id) {
         fetch("/api/knowledge", {
           method: "POST",
@@ -502,9 +549,18 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
           <textarea value={form.custom_prompt} onChange={(e) => setForm({ ...form, custom_prompt: e.target.value })} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Eres el asistente de ventas de..." />
         </div>
         {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
-        <button type="submit" disabled={loading} className="w-full bg-black text-white py-2.5 rounded-lg font-medium disabled:opacity-50">
-          {loading ? "Creando..." : "Crear cliente"}
-        </button>
+        {evolutionWarn && (
+          <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 whitespace-pre-wrap">{evolutionWarn}</div>
+        )}
+        {evolutionWarn ? (
+          <button type="button" onClick={onClose} className="w-full border rounded-lg py-2.5 text-sm">
+            Cerrar
+          </button>
+        ) : (
+          <button type="submit" disabled={loading} className="w-full bg-black text-white py-2.5 rounded-lg font-medium disabled:opacity-50">
+            {loading ? "Creando..." : "Crear cliente"}
+          </button>
+        )}
       </form>
     </Modal>
   );

@@ -8,14 +8,24 @@ export async function GET(req: NextRequest) {
   if (!requireAdmin(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const log: Record<string, unknown> = {};
+  const instance = req.nextUrl.searchParams.get("instance");
 
   // 1. Cliente
   try {
-    const { data: client, error } = await supabaseAdmin
+    const baseQuery = supabaseAdmin
       .from("clients")
-      .select("id, business_name, bot_enabled, instance_name, subscription_status")
-      .single();
-    log.step1_client = error ? { error: error.message } : { ok: true, bot_enabled: client?.bot_enabled, instance: client?.instance_name };
+      .select("id, business_name, bot_enabled, instance_name, subscription_status");
+
+    const { data: client, error } = await (
+      instance ? baseQuery.eq("instance_name", instance).single() : baseQuery.single()
+    );
+    log.step1_client = error ? { error: error.message } : {
+      ok: true,
+      business_name: client?.business_name,
+      bot_enabled: client?.bot_enabled,
+      instance: client?.instance_name,
+      subscription_status: client?.subscription_status,
+    };
     if (!client) return NextResponse.json({ log, failed_at: "step1_client" });
 
     // 2. IA - generar respuesta de prueba

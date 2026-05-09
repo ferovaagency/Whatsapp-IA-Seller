@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getQR, getInstanceStatus } from "@/lib/evolution/client";
+import { getQR, getInstanceStatus, provisionInstance, isInstanceNotFound } from "@/lib/evolution/client";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { requireAdmin } from "@/lib/auth";
 
@@ -9,33 +9,40 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
   const { instanceName } = await params;
 
   try {
-    const statusData = await getInstanceStatus(instanceName);
-    const state = statusData?.instance?.state || statusData?.state;
+    let [qrData, statusData] = await Promise.all([
+      getQR(instanceName),
+      getInstanceStatus(instanceName),
+    ]);
 
-    if (!state || statusData?.error || statusData?.response?.message) {
-      return NextResponse.json({
-        qr: null,
-        status: "not_created",
-        detail: Array.isArray(statusData?.response?.message)
-          ? statusData.response.message[0]
-          : "La instancia aún no existe en Evolution API. Créala desde el manager.",
-      }, { status: 404 });
+    // Si la instancia no existe en Evolution API, crearla automáticamente
+    if (isInstanceNotFound(qrData) || isInstanceNotFound(statusData)) {
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "";
+      const webhookUrl = appUrl ? `${appUrl}/api/webhook` : "";
+      const provisioned = await provisionInstance(instanceName, webhookUrl);
+
+      // Actualizar estado en Supabase
+      const newStatus = provisioned ? "ready" : "error";
+      await supabaseAdmin
+        .from("clients")
+        .update({ instance_status: newStatus })
+        .eq("instance_name", instanceName);
+
+      if (!provisioned) {
+        return NextResponse.json({ error: "No se pudo crear la instancia en Evolution API" }, { status: 503 });
+      }
+
+      // Reintentar obtener QR después de crear la instancia
+      [qrData, statusData] = await Promise.all([
+        getQR(instanceName),
+        getInstanceStatus(instanceName),
+      ]);
     }
 
-    // Sync status to DB
-    const dbStatus = state === "open" ? "connected" : state === "connecting" ? "connecting" : "disconnected";
-    supabaseAdmin.from("clients").update({ instance_status: dbStatus }).eq("instance_name", instanceName);
-
-    if (state === "open") {
-      return NextResponse.json({ qr: null, status: "open" });
-    }
-
-    const qrData = await getQR(instanceName);
-    const qr = qrData?.base64 || qrData?.qrcode?.base64 || qrData?.code?.base64 || null;
-
-    return NextResponse.json({ qr, status: state || "connecting" });
-  } catch (err) {
-    console.error("QR error:", err);
-    return NextResponse.json({ error: String(err) }, { status: 503 });
+    return NextResponse.json({
+      qr: qrData?.base64 || qrData?.qrcode?.base64 || null,
+      status: statusData?.state || "unknown",
+    });
+  } catch {
+    return NextResponse.json({ error: "Evolution API not available" }, { status: 503 });
   }
 }

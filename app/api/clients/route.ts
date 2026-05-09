@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { requireAdmin } from "@/lib/auth";
+import { provisionInstance } from "@/lib/evolution/client";
 
 export async function GET(req: NextRequest) {
   if (!requireAdmin(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -37,6 +38,7 @@ export async function POST(req: NextRequest) {
         custom_prompt: custom_prompt || null,
         plan: plan || "starter",
         instance_name: instanceName,
+        instance_status: "pending",
         subscription_status: "trial",
         subscription_expires_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
       })
@@ -45,40 +47,19 @@ export async function POST(req: NextRequest) {
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    // Crear instancia en Evolution API
-    const evolutionUrl = (process.env.EVOLUTION_API_URL || "").trim().replace(/\/$/, "");
-    const evolutionKey = (process.env.EVOLUTION_API_KEY || "").trim();
-    let evolutionResult: { ok: boolean; status?: number; body?: unknown; error?: string } = { ok: false, error: "Evolution API no configurada (faltan env vars)" };
+    // Crear instancia en Evolution API de forma sincrónica
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "";
+    const webhookUrl = appUrl ? `${appUrl}/api/webhook` : "";
+    const provisioned = await provisionInstance(instanceName, webhookUrl);
 
-    if (evolutionUrl && evolutionKey) {
-      try {
-        const evoRes = await fetch(`${evolutionUrl}/instance/create`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", apikey: evolutionKey },
-          body: JSON.stringify({ instanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" }),
-          signal: AbortSignal.timeout(10000),
-        });
-        const evoBody = await evoRes.json().catch(() => null);
-        evolutionResult = { ok: evoRes.ok, status: evoRes.status, body: evoBody };
+    // Actualizar estado en Supabase según resultado
+    const newStatus = provisioned ? "ready" : "error";
+    await supabaseAdmin
+      .from("clients")
+      .update({ instance_status: newStatus })
+      .eq("id", data.id);
 
-        // Webhook: solo si la instancia se creó bien y tenemos appUrl
-        if (evoRes.ok) {
-          const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "").trim();
-          if (appUrl) {
-            fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", apikey: evolutionKey },
-              body: JSON.stringify({ webhook: { enabled: true, url: `${appUrl}/api/webhook`, events: ["MESSAGES_UPSERT"] } }),
-              signal: AbortSignal.timeout(5000),
-            }).catch(() => {});
-          }
-        }
-      } catch (e) {
-        evolutionResult = { ok: false, error: String(e) };
-      }
-    }
-
-    return NextResponse.json({ ...data, _evolution: evolutionResult });
+    return NextResponse.json({ ...data, instance_status: newStatus });
   } catch (err: unknown) {
     return NextResponse.json({ error: `Error interno: ${String(err)}` }, { status: 500 });
   }

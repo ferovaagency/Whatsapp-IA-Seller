@@ -2,184 +2,192 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";
-import { sendMessage, getMediaBase64 } from "@/lib/evolution/client";
+import { sendMessage } from "@/lib/evolution/client";
 
-const HUMAN_SILENCE_MINUTES = 30;
-const BOT_DELAY_SECONDS = 2;
+const HUMAN_SILENCE_MINUTES = 15;
+const BOT_DELAY_SECONDS = 30;
+
+// Extrae el texto de cualquier tipo de mensaje de WhatsApp
+function extractText(msg: any): string {
+  return (
+    msg?.message?.conversation ||
+    msg?.message?.extendedTextMessage?.text ||
+    msg?.message?.ephemeralMessage?.message?.conversation ||
+    msg?.message?.ephemeralMessage?.message?.extendedTextMessage?.text ||
+    msg?.message?.viewOnceMessage?.message?.conversation ||
+    msg?.message?.imageMessage?.caption ||
+    msg?.message?.videoMessage?.caption ||
+    msg?.message?.documentMessage?.caption ||
+    ""
+  );
+}
+
+// Normaliza el comando para que no falle por tildes, espacios extra, etc.
+function normalizeCmd(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, ""); // quita tildes
+}
 
 export async function POST(req: NextRequest) {
+  let body: any;
   try {
-    const body = await req.json();
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ ok: true });
+  }
 
-    if (body.event !== "messages.upsert") return NextResponse.json({ ok: true });
+  const event = body.event;
 
-    // Evolution API v2 sends data as single message object OR as messages array
-    const msg = body.data?.messages?.[0] ?? (body.data?.key ? body.data : null);
-    if (!msg) return NextResponse.json({ ok: true });
+  // Evolution API puede enviar la data como array directo o como {messages:[...]}
+  const rawMessages: any[] =
+    Array.isArray(body.data) ? body.data :
+    Array.isArray(body.data?.messages) ? body.data.messages :
+    [];
 
-    const instanceName = body.instance;
-    const remoteJid: string = msg.key?.remoteJid ?? "";
-    const fromNumber = remoteJid.replace("@s.whatsapp.net", "");
+  const msg = rawMessages[0];
+  const instanceName: string = body.instance ?? "";
+  const messageText = extractText(msg);
+  const fromMe: boolean = !!msg?.key?.fromMe;
 
-    if (!fromNumber || remoteJid.endsWith("@g.us")) return NextResponse.json({ ok: true }); // ignorar grupos
+  // Log para diagnóstico — visible en Vercel/Railway logs
+  console.log("[webhook]", { event, instanceName, fromMe, text: messageText, remoteJid: msg?.key?.remoteJid });
 
-    // Si es mensaje del dueño: actualizar last_human_reply_at y salir
-    if (msg.key?.fromMe) {
-      const { data: client } = await supabaseAdmin
+  if (event !== "messages.upsert") return NextResponse.json({ ok: true });
+  if (!msg) return NextResponse.json({ ok: true });
+
+  // ── Comandos del dueño ─────────────────────────────────────────────────────
+  if (fromMe) {
+    const cmd = normalizeCmd(messageText);
+
+    if (cmd === "activar bot" || cmd === "apagar bot") {
+      const { data: owner, error: ownerErr } = await supabaseAdmin
         .from("clients")
-        .select("id")
+        .select("id, bot_enabled")
         .eq("instance_name", instanceName)
         .single();
 
-      if (client) {
-        await supabaseAdmin
-          .from("conversations")
-          .update({ last_human_reply_at: new Date().toISOString() })
-          .eq("client_id", client.id)
-          .eq("whatsapp_number", fromNumber);
-      }
-      return NextResponse.json({ ok: true });
-    }
+      console.log("[webhook] owner lookup:", { owner, ownerErr, instanceName });
 
-    // Detectar tipo de mensaje
-    const isAudio = !!(msg.message?.audioMessage || msg.message?.pttMessage);
-    let messageText: string =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      msg.message?.imageMessage?.caption ||
-      "";
+      if (owner) {
+        const enable = cmd === "activar bot";
+        const { error: updateErr } = await supabaseAdmin
+          .from("clients")
+          .update({ bot_enabled: enable })
+          .eq("id", owner.id);
 
-    // Transcribir audio con Gemini
-    if (isAudio && !messageText) {
-      try {
-        const mediaData = await getMediaBase64(instanceName, msg);
-        if (mediaData?.base64) {
-          messageText = await transcribeAudio(mediaData.base64, mediaData.mimetype ?? "audio/ogg");
+        console.log("[webhook] bot toggle:", { enable, updateErr });
+
+        const remoteJid = msg.key?.remoteJid ?? "";
+        if (remoteJid) {
+          await sendMessage(
+            instanceName,
+            remoteJid,
+            enable
+              ? "✅ Bot activado. Tus clientes recibirán respuestas automáticas."
+              : "⏸️ Bot desactivado. Responderás manualmente a tus clientes.",
+          );
         }
-      } catch {
-        // Si falla la transcripción, avisa al usuario
       }
     }
 
-    if (!messageText) return NextResponse.json({ ok: true });
-
-    // 1. Buscar cliente
-    const { data: client } = await supabaseAdmin
-      .from("clients")
-      .select("*")
-      .eq("instance_name", instanceName)
-      .single();
-
-    if (!client || !client.bot_enabled) return NextResponse.json({ ok: true });
-
-    if (client.subscription_status === "suspended" || client.subscription_status === "cancelled") {
-      return NextResponse.json({ ok: true });
-    }
-
-    // 2. Obtener o crear conversación
-    const { data: conversation } = await supabaseAdmin
-      .from("conversations")
-      .upsert(
-        { client_id: client.id, whatsapp_number: fromNumber, last_message_at: new Date().toISOString() },
-        { onConflict: "client_id,whatsapp_number", ignoreDuplicates: false }
-      )
-      .select()
-      .single();
-
-    if (!conversation) return NextResponse.json({ ok: true });
-
-    // 3. Guardar mensaje del usuario
-    const contentToSave = isAudio ? `[Audio transcrito]: ${messageText}` : messageText;
-    await supabaseAdmin.from("messages").insert({
-      conversation_id: conversation.id,
-      role: "user",
-      content: contentToSave,
-      whatsapp_message_id: msg.key?.id,
-    });
-
-    // 4. Filtro híbrido — ¿respondió el dueño recientemente?
-    if (conversation.last_human_reply_at) {
-      const minutesSinceHuman =
-        (Date.now() - new Date(conversation.last_human_reply_at).getTime()) / 60000;
-      if (minutesSinceHuman < HUMAN_SILENCE_MINUTES) {
-        return NextResponse.json({ ok: true });
-      }
-    }
-
-    // 5. Esperar y re-verificar
-    await new Promise((r) => setTimeout(r, BOT_DELAY_SECONDS * 1000));
-
-    const { data: freshConv } = await supabaseAdmin
-      .from("conversations")
-      .select("last_human_reply_at")
-      .eq("id", conversation.id)
-      .single();
-
-    if (freshConv?.last_human_reply_at) {
-      const minutesSince =
-        (Date.now() - new Date(freshConv.last_human_reply_at).getTime()) / 60000;
-      if (minutesSince < HUMAN_SILENCE_MINUTES) {
-        return NextResponse.json({ ok: true });
-      }
-    }
-
-    // 6. Historial reciente
-    const { data: history } = await supabaseAdmin
-      .from("messages")
-      .select("role, content")
-      .eq("conversation_id", conversation.id)
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    const messages = (history ?? [])
-      .reverse()
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-
-    // 7. Conocimiento relevante (solo si hay documentos cargados)
-    const { count } = await supabaseAdmin
-      .from("knowledge_base")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", client.id);
-    const knowledge = count && count > 0 ? await searchKnowledge(client.id, messageText) : "";
-
-    // 8. Generar respuesta
-    const systemPrompt = buildSystemPrompt(client, knowledge);
-    const ai = await getProvider();
-    const reply = await ai.generateResponse(messages, systemPrompt);
-
-    // 9. Enviar y guardar
-    await sendMessage(instanceName, remoteJid, reply);
-    await supabaseAdmin.from("messages").insert({
-      conversation_id: conversation.id,
-      role: "assistant",
-      content: reply,
-    });
-
-    return NextResponse.json({ ok: true, replied: true });
-  } catch (err) {
-    console.error("Webhook error:", err);
     return NextResponse.json({ ok: true });
   }
+
+  // ── Mensaje de cliente ──────────────────────────────────────────────────────
+  const fromNumber = msg.key?.remoteJid?.replace("@s.whatsapp.net", "");
+  if (!fromNumber || !messageText) return NextResponse.json({ ok: true });
+
+  const { data: client } = await supabaseAdmin
+    .from("clients")
+    .select("*")
+    .eq("instance_name", instanceName)
+    .single();
+
+  if (!client || !client.bot_enabled) return NextResponse.json({ ok: true });
+
+  if (client.subscription_status === "suspended" || client.subscription_status === "cancelled") {
+    return NextResponse.json({ ok: true });
+  }
+
+  const { data: conversation } = await supabaseAdmin
+    .from("conversations")
+    .upsert(
+      { client_id: client.id, whatsapp_number: fromNumber, last_message_at: new Date().toISOString() },
+      { onConflict: "client_id,whatsapp_number", ignoreDuplicates: false },
+    )
+    .select()
+    .single();
+
+  if (!conversation) return NextResponse.json({ ok: true });
+
+  await supabaseAdmin.from("messages").insert({
+    conversation_id: conversation.id,
+    role: "user",
+    content: messageText,
+    whatsapp_message_id: msg.key?.id,
+  });
+
+  if (conversation.last_human_reply_at) {
+    const minutesSinceHuman =
+      (Date.now() - new Date(conversation.last_human_reply_at).getTime()) / 60000;
+    if (minutesSinceHuman < HUMAN_SILENCE_MINUTES) {
+      return NextResponse.json({ ok: true });
+    }
+  }
+
+  await new Promise((r) => setTimeout(r, BOT_DELAY_SECONDS * 1000));
+
+  const { data: freshConv } = await supabaseAdmin
+    .from("conversations")
+    .select("last_human_reply_at")
+    .eq("id", conversation.id)
+    .single();
+
+  if (freshConv?.last_human_reply_at) {
+    const minutesSince =
+      (Date.now() - new Date(freshConv.last_human_reply_at).getTime()) / 60000;
+    if (minutesSince < HUMAN_SILENCE_MINUTES) {
+      return NextResponse.json({ ok: true });
+    }
+  }
+
+  const { data: history } = await supabaseAdmin
+    .from("messages")
+    .select("role, content")
+    .eq("conversation_id", conversation.id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const messages = (history ?? [])
+    .reverse()
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+  const knowledge = await searchKnowledge(client.id, messageText);
+  const systemPrompt = buildSystemPrompt(client, knowledge);
+  const ai = await getProvider();
+  const reply = await ai.generateResponse(messages, systemPrompt);
+
+  await sendMessage(instanceName, fromNumber + "@s.whatsapp.net", reply);
+
+  await supabaseAdmin.from("messages").insert({
+    conversation_id: conversation.id,
+    role: "assistant",
+    content: reply,
+  });
+
+  return NextResponse.json({ ok: true, replied: true });
 }
 
-async function transcribeAudio(base64: string, mimetype: string): Promise<string> {
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const audioData = base64.replace(/^data:[^;]+;base64,/, "");
-  const cleanMime = mimetype.split(";")[0].trim() || "audio/ogg";
-
-  const result = await model.generateContent([
-    { inlineData: { mimeType: cleanMime, data: audioData } },
-    "Transcribe este mensaje de audio. Devuelve únicamente el texto transcrito, sin comentarios adicionales.",
-  ]);
-  return result.response.text().trim();
-}
-
-function buildSystemPrompt(client: { business_name: string; custom_prompt: string | null }, knowledge: string): string {
-  const base = client.custom_prompt ||
+function buildSystemPrompt(
+  client: { business_name: string; custom_prompt: string | null },
+  knowledge: string,
+): string {
+  const base =
+    client.custom_prompt ||
     `Eres el asistente de ventas de ${client.business_name}. Tu misión es ayudar a los clientes, responder preguntas y cerrar ventas con calidez y honestidad.`;
 
   if (!knowledge) return base;

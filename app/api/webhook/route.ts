@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse, unstable_after as after } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";

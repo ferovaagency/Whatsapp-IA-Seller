@@ -40,6 +40,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
       ]);
     }
 
+    // Log del raw response para diagnosticar el formato exacto de la API
+    console.log("[qr] raw qrData:", JSON.stringify(qrData).slice(0, 300));
+    console.log("[qr] raw statusData:", JSON.stringify(statusData));
+
     // Evolution API v2 devuelve { instance: { state: "..." } }, no { state: "..." }
     const state =
       statusData?.instance?.state ||
@@ -47,13 +51,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
       "unknown";
 
     // El QR puede venir en varias posiciones según la versión de Evolution API
-    const qr =
+    const rawBase64: string | null =
       qrData?.base64 ||
       qrData?.qrcode?.base64 ||
       qrData?.qr?.base64 ||
       null;
 
-    return NextResponse.json({ qr, status: state });
+    // Asegurar que el base64 tenga el prefijo data URL correcto
+    let qr: string | null = null;
+    if (rawBase64) {
+      qr = rawBase64.startsWith("data:") ? rawBase64 : `data:image/png;base64,${rawBase64}`;
+    }
+
+    return NextResponse.json({ qr, status: state, _raw: { qrKeys: Object.keys(qrData ?? {}), statusKeys: Object.keys(statusData ?? {}) } });
   } catch {
     return NextResponse.json({ error: "Evolution API not available" }, { status: 503 });
   }

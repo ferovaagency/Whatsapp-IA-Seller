@@ -31,17 +31,29 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ inst
         return NextResponse.json({ error: "No se pudo crear la instancia en Evolution API" }, { status: 503 });
       }
 
-      // Reintentar obtener QR después de crear la instancia
+      // Esperar que la instancia inicialice antes de pedir el QR
+      await new Promise((r) => setTimeout(r, 3000));
+
       [qrData, statusData] = await Promise.all([
         getQR(instanceName),
         getInstanceStatus(instanceName),
       ]);
     }
 
-    return NextResponse.json({
-      qr: qrData?.base64 || qrData?.qrcode?.base64 || null,
-      status: statusData?.state || "unknown",
-    });
+    // Evolution API v2 devuelve { instance: { state: "..." } }, no { state: "..." }
+    const state =
+      statusData?.instance?.state ||
+      statusData?.state ||
+      "unknown";
+
+    // El QR puede venir en varias posiciones según la versión de Evolution API
+    const qr =
+      qrData?.base64 ||
+      qrData?.qrcode?.base64 ||
+      qrData?.qr?.base64 ||
+      null;
+
+    return NextResponse.json({ qr, status: state });
   } catch {
     return NextResponse.json({ error: "Evolution API not available" }, { status: 503 });
   }

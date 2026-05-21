@@ -1,11 +1,12 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, unstable_after as after } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";
 import { sendMessage } from "@/lib/evolution/client";
 
 const HUMAN_SILENCE_MINUTES = 15;
-const BOT_DELAY_SECONDS = 30;
+// Delay reducido a 3s — el sleep de 30s mataba la función en Vercel (timeout 10s hobby / 60s pro)
+const BOT_DELAY_MS = 3000;
 
 // Extrae el texto de cualquier tipo de mensaje de WhatsApp
 function extractText(msg: any): string {
@@ -41,7 +42,6 @@ export async function POST(req: NextRequest) {
 
   const event = body.event;
 
-  // Evolution API puede enviar la data como array directo o como {messages:[...]}
   const rawMessages: any[] =
     Array.isArray(body.data) ? body.data :
     Array.isArray(body.data?.messages) ? body.data.messages :
@@ -52,7 +52,6 @@ export async function POST(req: NextRequest) {
   const messageText = extractText(msg);
   const fromMe: boolean = !!msg?.key?.fromMe;
 
-  // Log para diagnóstico — visible en Vercel/Railway logs
   console.log("[webhook]", { event, instanceName, fromMe, text: messageText, remoteJid: msg?.key?.remoteJid });
 
   if (event !== "messages.upsert") return NextResponse.json({ ok: true });
@@ -138,48 +137,79 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  await new Promise((r) => setTimeout(r, BOT_DELAY_SECONDS * 1000));
+  // Respondemos a Evolution API de inmediato para evitar el timeout de Vercel.
+  // El procesamiento de IA sigue corriendo en background con waitUntil.
+  const response = NextResponse.json({ ok: true });
 
-  const { data: freshConv } = await supabaseAdmin
-    .from("conversations")
-    .select("last_human_reply_at")
-    .eq("id", conversation.id)
-    .single();
+  after(processAndReply({
+    client,
+    conversation,
+    messageText,
+    instanceName,
+    fromNumber,
+  }));
 
-  if (freshConv?.last_human_reply_at) {
-    const minutesSince =
-      (Date.now() - new Date(freshConv.last_human_reply_at).getTime()) / 60000;
-    if (minutesSince < HUMAN_SILENCE_MINUTES) {
-      return NextResponse.json({ ok: true });
+  return response;
+}
+
+async function processAndReply({
+  client,
+  conversation,
+  messageText,
+  instanceName,
+  fromNumber,
+}: {
+  client: any;
+  conversation: any;
+  messageText: string;
+  instanceName: string;
+  fromNumber: string;
+}) {
+  try {
+    // Pequeño delay para simular que alguien está escribiendo, sin bloquear Vercel
+    await new Promise((r) => setTimeout(r, BOT_DELAY_MS));
+
+    const { data: freshConv } = await supabaseAdmin
+      .from("conversations")
+      .select("last_human_reply_at")
+      .eq("id", conversation.id)
+      .single();
+
+    if (freshConv?.last_human_reply_at) {
+      const minutesSince =
+        (Date.now() - new Date(freshConv.last_human_reply_at).getTime()) / 60000;
+      if (minutesSince < HUMAN_SILENCE_MINUTES) return;
     }
+
+    const { data: history } = await supabaseAdmin
+      .from("messages")
+      .select("role, content")
+      .eq("conversation_id", conversation.id)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const messages = (history ?? [])
+      .reverse()
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+    const knowledge = await searchKnowledge(client.id, messageText);
+    const systemPrompt = buildSystemPrompt(client, knowledge);
+    const ai = await getProvider();
+    const reply = await ai.generateResponse(messages, systemPrompt);
+
+    await sendMessage(instanceName, fromNumber + "@s.whatsapp.net", reply);
+
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversation.id,
+      role: "assistant",
+      content: reply,
+    });
+
+    console.log("[webhook] replied", { instanceName, fromNumber, chars: reply.length });
+  } catch (err) {
+    console.error("[webhook] processAndReply error:", err);
   }
-
-  const { data: history } = await supabaseAdmin
-    .from("messages")
-    .select("role, content")
-    .eq("conversation_id", conversation.id)
-    .order("created_at", { ascending: false })
-    .limit(10);
-
-  const messages = (history ?? [])
-    .reverse()
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-
-  const knowledge = await searchKnowledge(client.id, messageText);
-  const systemPrompt = buildSystemPrompt(client, knowledge);
-  const ai = await getProvider();
-  const reply = await ai.generateResponse(messages, systemPrompt);
-
-  await sendMessage(instanceName, fromNumber + "@s.whatsapp.net", reply);
-
-  await supabaseAdmin.from("messages").insert({
-    conversation_id: conversation.id,
-    role: "assistant",
-    content: reply,
-  });
-
-  return NextResponse.json({ ok: true, replied: true });
 }
 
 function buildSystemPrompt(

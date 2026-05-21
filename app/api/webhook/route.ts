@@ -1,14 +1,11 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";
 import { sendMessage } from "@/lib/evolution/client";
 
 const HUMAN_SILENCE_MINUTES = 15;
-// Delay reducido a 3s — el sleep de 30s mataba la función en Vercel (timeout 10s hobby / 60s pro)
-const BOT_DELAY_MS = 3000;
 
-// Extrae el texto de cualquier tipo de mensaje de WhatsApp
 function extractText(msg: any): string {
   return (
     msg?.message?.conversation ||
@@ -23,13 +20,12 @@ function extractText(msg: any): string {
   );
 }
 
-// Normaliza el comando para que no falle por tildes, espacios extra, etc.
 function normalizeCmd(text: string): string {
   return text
     .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, ""); // quita tildes
+    .replace(/[̀-ͯ]/g, "");
 }
 
 export async function POST(req: NextRequest) {
@@ -41,7 +37,6 @@ export async function POST(req: NextRequest) {
   }
 
   const event = body.event;
-
   const rawMessages: any[] =
     Array.isArray(body.data) ? body.data :
     Array.isArray(body.data?.messages) ? body.data.messages :
@@ -52,50 +47,39 @@ export async function POST(req: NextRequest) {
   const messageText = extractText(msg);
   const fromMe: boolean = !!msg?.key?.fromMe;
 
-  console.log("[webhook]", { event, instanceName, fromMe, text: messageText, remoteJid: msg?.key?.remoteJid });
+  console.log("[webhook]", { event, instanceName, fromMe, text: messageText?.slice(0, 80) });
 
   if (event !== "messages.upsert") return NextResponse.json({ ok: true });
   if (!msg) return NextResponse.json({ ok: true });
 
-  // ── Comandos del dueño ─────────────────────────────────────────────────────
+  // ── Comandos del dueño ───────────────────────────────────────────────────────
   if (fromMe) {
     const cmd = normalizeCmd(messageText);
-
     if (cmd === "activar bot" || cmd === "apagar bot") {
-      const { data: owner, error: ownerErr } = await supabaseAdmin
+      const { data: owner } = await supabaseAdmin
         .from("clients")
-        .select("id, bot_enabled")
+        .select("id")
         .eq("instance_name", instanceName)
         .single();
 
-      console.log("[webhook] owner lookup:", { owner, ownerErr, instanceName });
-
       if (owner) {
         const enable = cmd === "activar bot";
-        const { error: updateErr } = await supabaseAdmin
-          .from("clients")
-          .update({ bot_enabled: enable })
-          .eq("id", owner.id);
-
-        console.log("[webhook] bot toggle:", { enable, updateErr });
-
+        await supabaseAdmin.from("clients").update({ bot_enabled: enable }).eq("id", owner.id);
         const remoteJid = msg.key?.remoteJid ?? "";
         if (remoteJid) {
-          await sendMessage(
-            instanceName,
-            remoteJid,
+          await sendMessage(instanceName, remoteJid,
             enable
               ? "✅ Bot activado. Tus clientes recibirán respuestas automáticas."
-              : "⏸️ Bot desactivado. Responderás manualmente a tus clientes.",
+              : "⏸️ Bot desactivado. Responderás manualmente a tus clientes."
           );
         }
+        console.log("[webhook] bot toggled:", { enable, instance: instanceName });
       }
     }
-
     return NextResponse.json({ ok: true });
   }
 
-  // ── Mensaje de cliente ──────────────────────────────────────────────────────
+  // ── Mensaje de cliente ───────────────────────────────────────────────────────
   const fromNumber = msg.key?.remoteJid?.replace("@s.whatsapp.net", "");
   if (!fromNumber || !messageText) return NextResponse.json({ ok: true });
 
@@ -105,8 +89,14 @@ export async function POST(req: NextRequest) {
     .eq("instance_name", instanceName)
     .single();
 
-  if (!client || !client.bot_enabled) return NextResponse.json({ ok: true });
-
+  if (!client) {
+    console.warn("[webhook] no client for instance:", instanceName);
+    return NextResponse.json({ ok: true });
+  }
+  if (!client.bot_enabled) {
+    console.log("[webhook] bot disabled for:", instanceName);
+    return NextResponse.json({ ok: true });
+  }
   if (client.subscription_status === "suspended" || client.subscription_status === "cancelled") {
     return NextResponse.json({ ok: true });
   }
@@ -122,65 +112,37 @@ export async function POST(req: NextRequest) {
 
   if (!conversation) return NextResponse.json({ ok: true });
 
-  await supabaseAdmin.from("messages").insert({
-    conversation_id: conversation.id,
-    role: "user",
-    content: messageText,
-    whatsapp_message_id: msg.key?.id,
-  });
-
-  if (conversation.last_human_reply_at) {
-    const minutesSinceHuman =
-      (Date.now() - new Date(conversation.last_human_reply_at).getTime()) / 60000;
-    if (minutesSinceHuman < HUMAN_SILENCE_MINUTES) {
+  // Deduplicar por whatsapp_message_id
+  const msgId = msg.key?.id;
+  if (msgId) {
+    const { count } = await supabaseAdmin
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("whatsapp_message_id", msgId);
+    if (count && count > 0) {
+      console.log("[webhook] duplicate message ignored:", msgId);
       return NextResponse.json({ ok: true });
     }
   }
 
-  // Respondemos a Evolution API de inmediato para evitar el timeout de Vercel.
-  // El procesamiento de IA sigue corriendo en background con waitUntil.
-  const response = NextResponse.json({ ok: true });
+  await supabaseAdmin.from("messages").insert({
+    conversation_id: conversation.id,
+    role: "user",
+    content: messageText,
+    whatsapp_message_id: msgId ?? null,
+  });
 
-  after(processAndReply({
-    client,
-    conversation,
-    messageText,
-    instanceName,
-    fromNumber,
-  }));
-
-  return response;
-}
-
-async function processAndReply({
-  client,
-  conversation,
-  messageText,
-  instanceName,
-  fromNumber,
-}: {
-  client: any;
-  conversation: any;
-  messageText: string;
-  instanceName: string;
-  fromNumber: string;
-}) {
-  try {
-    // Pequeño delay para simular que alguien está escribiendo, sin bloquear Vercel
-    await new Promise((r) => setTimeout(r, BOT_DELAY_MS));
-
-    const { data: freshConv } = await supabaseAdmin
-      .from("conversations")
-      .select("last_human_reply_at")
-      .eq("id", conversation.id)
-      .single();
-
-    if (freshConv?.last_human_reply_at) {
-      const minutesSince =
-        (Date.now() - new Date(freshConv.last_human_reply_at).getTime()) / 60000;
-      if (minutesSince < HUMAN_SILENCE_MINUTES) return;
+  // Si el dueño respondió recientemente, el bot no interrumpe
+  if (conversation.last_human_reply_at) {
+    const minutesSince = (Date.now() - new Date(conversation.last_human_reply_at).getTime()) / 60000;
+    if (minutesSince < HUMAN_SILENCE_MINUTES) {
+      console.log("[webhook] human active, skipping bot reply");
+      return NextResponse.json({ ok: true });
     }
+  }
 
+  // ── Generar y enviar respuesta ───────────────────────────────────────────────
+  try {
     const { data: history } = await supabaseAdmin
       .from("messages")
       .select("role, content")
@@ -193,12 +155,11 @@ async function processAndReply({
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-    // Si el embedding falla (ej. GEMINI_API_KEY no configurada), seguimos sin RAG
     let knowledge = "";
     try {
       knowledge = await searchKnowledge(client.id, messageText);
-    } catch (kErr) {
-      console.warn("[webhook] searchKnowledge failed, continuing without RAG:", kErr);
+    } catch {
+      // Continúa sin RAG si Gemini no está disponible
     }
 
     const systemPrompt = buildSystemPrompt(client, knowledge);
@@ -213,10 +174,12 @@ async function processAndReply({
       content: reply,
     });
 
-    console.log("[webhook] replied", { instanceName, fromNumber, chars: reply.length });
+    console.log("[webhook] replied OK", { instanceName, fromNumber, chars: reply.length });
   } catch (err) {
-    console.error("[webhook] processAndReply error:", err);
+    console.error("[webhook] reply error:", err);
   }
+
+  return NextResponse.json({ ok: true, replied: true });
 }
 
 function buildSystemPrompt(

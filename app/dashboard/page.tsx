@@ -1,6 +1,14 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
 
+type Report = {
+  id: string;
+  description: string;
+  resolved: boolean;
+  created_at: string;
+  clients: { id: string; business_name: string; name: string } | null;
+};
+
 type Client = {
   id: string;
   name: string;
@@ -28,16 +36,36 @@ function fileAuthHeaders() {
 }
 
 export default function Dashboard() {
+  const [tab, setTab] = useState<"clients" | "reports">("clients");
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [qrModal, setQrModal] = useState<{ clientId: string; instanceName: string; qr: string | null; status: string; detail?: string } | null>(null);
   const [knowledgeModal, setKnowledgeModal] = useState<Client | null>(null);
   const [editModal, setEditModal] = useState<Client | null>(null);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
 
   useEffect(() => {
     loadClients();
+    loadReports();
   }, []);
+
+  async function loadReports() {
+    setReportsLoading(true);
+    const res = await fetch("/api/reports", { headers: authHeaders() });
+    if (res.ok) setReports(await res.json());
+    setReportsLoading(false);
+  }
+
+  async function toggleResolved(report: Report) {
+    await fetch(`/api/reports/${report.id}`, {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify({ resolved: !report.resolved }),
+    });
+    setReports((prev) => prev.map((r) => r.id === report.id ? { ...r, resolved: !r.resolved } : r));
+  }
 
   async function loadClients() {
     setLoading(true);
@@ -130,13 +158,42 @@ export default function Dashboard() {
           <h1 className="text-xl font-bold">Ferova AI — Panel Admin</h1>
           <p className="text-sm text-gray-500">Gestión de clientes WhatsApp AI</p>
         </div>
-        <button onClick={() => setShowForm(true)} className="bg-black text-white px-4 py-2 rounded-lg text-sm font-medium">
-          + Nuevo cliente
-        </button>
+        <div className="flex items-center gap-3">
+          {tab === "clients" && (
+            <button onClick={() => setShowForm(true)} className="bg-black text-white px-4 py-2 rounded-lg text-sm font-medium">
+              + Nuevo cliente
+            </button>
+          )}
+        </div>
       </header>
 
+      {/* Tabs */}
+      <div className="bg-white border-b px-6">
+        <div className="flex gap-6 max-w-7xl mx-auto">
+          <button
+            onClick={() => setTab("clients")}
+            className={`py-3 text-sm font-medium border-b-2 transition-colors ${tab === "clients" ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-700"}`}
+          >
+            Clientes
+          </button>
+          <button
+            onClick={() => setTab("reports")}
+            className={`py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${tab === "reports" ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-700"}`}
+          >
+            Reportes
+            {reports.filter((r) => !r.resolved).length > 0 && (
+              <span className="bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 leading-none">
+                {reports.filter((r) => !r.resolved).length}
+              </span>
+            )}
+          </button>
+        </div>
+      </div>
+
       <main className="p-6 max-w-7xl mx-auto">
-        {loading ? (
+        {tab === "reports" ? (
+          <ReportsSection reports={reports} loading={reportsLoading} onToggle={toggleResolved} onRefresh={loadReports} />
+        ) : loading ? (
           <p className="text-gray-500 text-center py-12">Cargando clientes...</p>
         ) : clients.length === 0 ? (
           <div className="text-center py-16 text-gray-400">
@@ -268,6 +325,88 @@ export default function Dashboard() {
       )}
 
       {showForm && <NewClientForm onClose={() => setShowForm(false)} onCreated={loadClients} />}
+    </div>
+  );
+}
+
+function ReportsSection({
+  reports,
+  loading,
+  onToggle,
+  onRefresh,
+}: {
+  reports: Report[];
+  loading: boolean;
+  onToggle: (r: Report) => void;
+  onRefresh: () => void;
+}) {
+  const [filter, setFilter] = useState<"all" | "pending" | "resolved">("pending");
+
+  const filtered = reports.filter((r) => {
+    if (filter === "pending") return !r.resolved;
+    if (filter === "resolved") return r.resolved;
+    return true;
+  });
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex gap-2">
+          {(["pending", "resolved", "all"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${filter === f ? "bg-black text-white" : "bg-white border text-gray-600 hover:bg-gray-50"}`}
+            >
+              {f === "pending" ? `Pendientes (${reports.filter((r) => !r.resolved).length})` : f === "resolved" ? "Revisados" : "Todos"}
+            </button>
+          ))}
+        </div>
+        <button onClick={onRefresh} className="text-xs text-gray-500 hover:text-gray-700 border rounded-lg px-3 py-1.5">
+          Actualizar
+        </button>
+      </div>
+
+      {loading ? (
+        <p className="text-gray-500 text-center py-12">Cargando reportes...</p>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-16 text-gray-400">
+          <p className="text-lg">{filter === "pending" ? "Sin reportes pendientes" : "No hay reportes"}</p>
+        </div>
+      ) : (
+        <div className="grid gap-3">
+          {filtered.map((r) => (
+            <div key={r.id} className={`bg-white rounded-xl border p-5 transition-opacity ${r.resolved ? "opacity-60" : ""}`}>
+              <div className="flex justify-between items-start gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-semibold text-sm">{r.clients?.business_name ?? "Cliente desconocido"}</span>
+                    <span className="text-xs text-gray-400">·</span>
+                    <span className="text-xs text-gray-400">{r.clients?.name}</span>
+                  </div>
+                  <p className="text-sm text-gray-700 whitespace-pre-wrap">{r.description}</p>
+                  <p className="text-xs text-gray-400 mt-2">
+                    {new Date(r.created_at).toLocaleString("es-CO", {
+                      day: "2-digit", month: "short", year: "numeric",
+                      hour: "2-digit", minute: "2-digit",
+                    })}
+                  </p>
+                </div>
+                <button
+                  onClick={() => onToggle(r)}
+                  className={`shrink-0 text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors ${
+                    r.resolved
+                      ? "border-gray-200 text-gray-500 hover:border-black hover:text-black"
+                      : "border-green-200 text-green-700 bg-green-50 hover:bg-green-100"
+                  }`}
+                >
+                  {r.resolved ? "Marcar pendiente" : "✓ Marcar revisado"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

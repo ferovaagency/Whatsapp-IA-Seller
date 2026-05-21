@@ -193,7 +193,14 @@ async function processAndReply({
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-    const knowledge = await searchKnowledge(client.id, messageText);
+    // Si el embedding falla (ej. GEMINI_API_KEY no configurada), seguimos sin RAG
+    let knowledge = "";
+    try {
+      knowledge = await searchKnowledge(client.id, messageText);
+    } catch (kErr) {
+      console.warn("[webhook] searchKnowledge failed, continuing without RAG:", kErr);
+    }
+
     const systemPrompt = buildSystemPrompt(client, knowledge);
     const ai = await getProvider();
     const reply = await ai.generateResponse(messages, systemPrompt);

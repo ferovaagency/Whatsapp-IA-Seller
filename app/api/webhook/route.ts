@@ -37,12 +37,18 @@ export async function POST(req: NextRequest) {
   }
 
   const event = body.event;
-  const rawMessages: any[] =
-    Array.isArray(body.data) ? body.data :
-    Array.isArray(body.data?.messages) ? body.data.messages :
-    [];
 
-  const msg = rawMessages[0];
+  // Evolution API v2 envía body.data como objeto único; v1/otros como array
+  let msg: any = null;
+  if (Array.isArray(body.data)) {
+    msg = body.data[0] ?? null;
+  } else if (Array.isArray(body.data?.messages)) {
+    msg = body.data.messages[0] ?? null;
+  } else if (body.data?.key) {
+    // v2: data es el mensaje directamente
+    msg = body.data;
+  }
+
   const instanceName: string = body.instance ?? "";
   const messageText = extractText(msg);
   const fromMe: boolean = !!msg?.key?.fromMe;

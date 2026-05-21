@@ -5,7 +5,11 @@ import { sendMessage } from "@/lib/evolution/client";
 import { requireAdmin } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
-  if (!requireAdmin(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Permite acceso sin header si la key está en la query string, para facilitar pruebas en browser
+  const queryKey = req.nextUrl.searchParams.get("key");
+  const adminSecret = process.env.ADMIN_SECRET;
+  const authorized = requireAdmin(req) || (queryKey && adminSecret && queryKey === adminSecret);
+  if (!authorized) return NextResponse.json({ error: "Unauthorized — add ?key=TU_ADMIN_SECRET a la URL" }, { status: 401 });
 
   const log: Record<string, unknown> = {};
   const instance = req.nextUrl.searchParams.get("instance");

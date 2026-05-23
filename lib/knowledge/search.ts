@@ -1,7 +1,6 @@
 import { supabaseAdmin } from "../supabase/client";
 
 export async function searchKnowledge(clientId: string, query: string, limit = 5): Promise<string> {
-  // Check if knowledge base has any content first — avoids embedding calls when empty
   const { count } = await supabaseAdmin
     .from("knowledge_base")
     .select("id", { count: "exact", head: true })
@@ -10,22 +9,46 @@ export async function searchKnowledge(clientId: string, query: string, limit = 5
 
   if (!count) return "";
 
-  let embedding: number[];
+  // Try vector search if embedding is available
+  let embedding: number[] | null = null;
   try {
     embedding = await generateEmbedding(query);
   } catch {
-    // Embedding provider unavailable — skip RAG rather than crashing the bot
-    return "";
+    // Gemini unavailable — fall through to FTS
   }
 
-  const { data, error } = await supabaseAdmin.rpc("match_knowledge", {
-    client_id_input: clientId,
-    query_embedding: embedding,
-    match_count: limit,
-  });
+  if (embedding) {
+    const { data, error } = await supabaseAdmin.rpc("match_knowledge", {
+      client_id_input: clientId,
+      query_embedding: embedding,
+      match_count: limit,
+    });
+    if (!error && data?.length) {
+      return data.map((d: { content: string }) => d.content).join("\n\n---\n\n");
+    }
+  }
 
-  if (error || !data?.length) return "";
-  return data.map((d: { content: string }) => d.content).join("\n\n---\n\n");
+  // FTS fallback (works without Gemini)
+  const { data: ftsData } = await supabaseAdmin
+    .from("knowledge_base")
+    .select("content")
+    .eq("client_id", clientId)
+    .textSearch("content", query, { type: "websearch", config: "spanish" })
+    .limit(limit);
+
+  if (ftsData?.length) {
+    return ftsData.map((d: { content: string }) => d.content).join("\n\n---\n\n");
+  }
+
+  // ILIKE last resort
+  const { data: likeData } = await supabaseAdmin
+    .from("knowledge_base")
+    .select("content")
+    .eq("client_id", clientId)
+    .ilike("content", `%${query}%`)
+    .limit(limit);
+
+  return (likeData ?? []).map((d: { content: string }) => d.content).join("\n\n---\n\n");
 }
 
 async function generateEmbedding(text: string): Promise<number[]> {
@@ -42,13 +65,21 @@ async function generateEmbedding(text: string): Promise<number[]> {
 export async function ingestText(clientId: string, content: string, source: string) {
   const chunks = splitIntoChunks(content, 500);
   for (const chunk of chunks) {
-    const embedding = await generateEmbedding(chunk);
-    await supabaseAdmin.from("knowledge_base").insert({
+    let embedding: number[] | null = null;
+    try {
+      embedding = await generateEmbedding(chunk);
+    } catch {
+      // Store without embedding — FTS will still find it
+    }
+
+    const row: Record<string, unknown> = {
       client_id: clientId,
       content: chunk,
       source,
-      embedding,
-    });
+    };
+    if (embedding) row.embedding = embedding;
+
+    await supabaseAdmin.from("knowledge_base").insert(row);
   }
 }
 

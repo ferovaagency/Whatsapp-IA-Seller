@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 
 type Report = {
   id: string;
@@ -25,35 +26,71 @@ type Client = {
   created_at: string;
 };
 
-const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_SECRET || "ferova_admin_2026";
+type QrModalState = {
+  clientId: string;
+  instanceName: string;
+  qr: string | null;
+  status: string;
+  detail?: string;
+};
 
-function authHeaders() {
-  return { "Content-Type": "application/json", Authorization: `Bearer ${ADMIN_KEY}` };
+const SESSION_KEY = "ferova_admin_token";
+
+async function getToken(): Promise<string> {
+  // 1. Try sessionStorage first (fastest)
+  const cached = sessionStorage.getItem(SESSION_KEY);
+  if (cached) return cached;
+
+  // 2. Recover from httpOnly cookie via server endpoint (tab reopened)
+  const res = await fetch("/api/admin/session");
+  if (res.ok) {
+    const { token } = await res.json();
+    sessionStorage.setItem(SESSION_KEY, token);
+    return token;
+  }
+
+  return "";
 }
 
-function fileAuthHeaders() {
-  return { Authorization: `Bearer ${ADMIN_KEY}` };
+function authHeaders(token: string) {
+  return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+}
+
+function fileAuthHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
 }
 
 export default function Dashboard() {
   const [tab, setTab] = useState<"clients" | "reports">("clients");
+  const router = useRouter();
+  const [token, setToken] = useState("");
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [qrModal, setQrModal] = useState<{ clientId: string; instanceName: string; qr: string | null; status: string; detail?: string } | null>(null);
+  const [qrModal, setQrModal] = useState<QrModalState | null>(null);
   const [knowledgeModal, setKnowledgeModal] = useState<Client | null>(null);
   const [editModal, setEditModal] = useState<Client | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
+  const [catalogModal, setCatalogModal] = useState<Client | null>(null);
 
   useEffect(() => {
+    getToken().then((t) => {
+      if (!t) { router.push("/dashboard/login"); return; }
+      setToken(t);
+    });
+  }, [router]);
+
+  useEffect(() => {
+    if (!token) return;
     loadClients();
     loadReports();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
   async function loadReports() {
     setReportsLoading(true);
-    const res = await fetch("/api/reports", { headers: authHeaders() });
+    const res = await fetch("/api/reports", { headers: authHeaders(token) });
     if (res.ok) setReports(await res.json());
     setReportsLoading(false);
   }
@@ -61,15 +98,21 @@ export default function Dashboard() {
   async function toggleResolved(report: Report) {
     await fetch(`/api/reports/${report.id}`, {
       method: "PATCH",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify({ resolved: !report.resolved }),
     });
     setReports((prev) => prev.map((r) => r.id === report.id ? { ...r, resolved: !r.resolved } : r));
   }
 
+  async function logout() {
+    sessionStorage.removeItem(SESSION_KEY);
+    await fetch("/api/admin/logout", { method: "POST" });
+    router.push("/dashboard/login");
+  }
+
   async function loadClients() {
     setLoading(true);
-    const res = await fetch("/api/clients", { headers: authHeaders() });
+    const res = await fetch("/api/clients", { headers: authHeaders(token) });
     if (res.ok) setClients(await res.json());
     setLoading(false);
   }
@@ -77,7 +120,7 @@ export default function Dashboard() {
   async function toggleBot(client: Client) {
     await fetch(`/api/clients/${client.id}`, {
       method: "PATCH",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify({ bot_enabled: !client.bot_enabled }),
     });
     loadClients();
@@ -89,7 +132,7 @@ export default function Dashboard() {
       : null;
     await fetch(`/api/clients/${client.id}`, {
       method: "PATCH",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify({ subscription_status: status, subscription_expires_at: expires, bot_enabled: status === "active" }),
     });
     loadClients();
@@ -97,12 +140,12 @@ export default function Dashboard() {
 
   async function deleteClient(client: Client) {
     if (!confirm(`¿Eliminar a ${client.business_name}? Esta acción no se puede deshacer.`)) return;
-    await fetch(`/api/clients/${client.id}`, { method: "DELETE", headers: authHeaders() });
+    await fetch(`/api/clients/${client.id}`, { method: "DELETE", headers: authHeaders(token) });
     loadClients();
   }
 
   async function setupWebhook(client: Client) {
-    const res = await fetch(`/api/clients/${client.id}/webhook`, { method: "POST", headers: authHeaders() });
+    const res = await fetch(`/api/clients/${client.id}/webhook`, { method: "POST", headers: authHeaders(token) });
     const data = await res.json();
     if (res.ok) {
       alert(`Webhook configurado correctamente.\nURL: ${data.webhookUrl}`);
@@ -114,7 +157,7 @@ export default function Dashboard() {
   async function showQR(client: Client) {
     setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: null, status: "loading" });
     try {
-      const res = await fetch(`/api/qr/${client.instance_name}`, { headers: authHeaders() });
+      const res = await fetch(`/api/qr/${client.instance_name}`, { headers: authHeaders(token) });
       const data = await res.json();
       if (res.ok) {
         setQrModal({ clientId: client.id, instanceName: client.instance_name, qr: data.qr, status: data.status });
@@ -129,14 +172,13 @@ export default function Dashboard() {
   async function createInstance(clientId: string, instanceName: string) {
     setQrModal((prev) => prev ? { ...prev, status: "creating" } : null);
     try {
-      const res = await fetch(`/api/clients/${clientId}/instance`, { method: "POST", headers: authHeaders() });
+      const res = await fetch(`/api/clients/${clientId}/instance`, { method: "POST", headers: authHeaders(token) });
       const data = await res.json();
       if (!res.ok) {
         setQrModal((prev) => prev ? { ...prev, status: "error", detail: data.error } : null);
         return;
       }
-      // Instance created — now fetch QR
-      const qrRes = await fetch(`/api/qr/${instanceName}`, { headers: authHeaders() });
+      const qrRes = await fetch(`/api/qr/${instanceName}`, { headers: authHeaders(token) });
       const qrData = await qrRes.json();
       setQrModal((prev) => prev ? { ...prev, qr: qrData.qr ?? null, status: qrData.status ?? "connecting" } : null);
     } catch (err) {
@@ -164,6 +206,9 @@ export default function Dashboard() {
               + Nuevo cliente
             </button>
           )}
+          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 border rounded-lg px-3 py-2">
+            Cerrar sesión
+          </button>
         </div>
       </header>
 
@@ -264,6 +309,9 @@ export default function Dashboard() {
                   <button onClick={() => setupWebhook(c)} className="text-xs border border-blue-200 text-blue-600 rounded-lg px-3 py-1.5 hover:bg-blue-50">
                     🔔 Webhook
                   </button>
+                  <button onClick={() => setCatalogModal(c)} className="text-xs border border-purple-200 text-purple-600 rounded-lg px-3 py-1.5 hover:bg-purple-50">
+                    📦 Script catálogo
+                  </button>
                   <button onClick={() => deleteClient(c)} className="text-xs border border-red-200 text-red-600 rounded-lg px-3 py-1.5 hover:bg-red-50">
                     🗑️ Eliminar
                   </button>
@@ -280,51 +328,27 @@ export default function Dashboard() {
       </main>
 
       {qrModal && (
-        <Modal onClose={() => setQrModal(null)} title="Conectar WhatsApp">
-          <p className="text-sm text-gray-600 mb-4">Escanea el QR desde el WhatsApp del cliente.</p>
-          {qrModal.status === "loading" ? (
-            <p className="text-center py-8 text-gray-500">Verificando instancia...</p>
-          ) : qrModal.status === "creating" ? (
-            <p className="text-center py-8 text-gray-500">Creando instancia en Evolution API...</p>
-          ) : qrModal.qr ? (
-            <img src={qrModal.qr} alt="QR WhatsApp" className="mx-auto w-64 h-64" />
-          ) : qrModal.status === "open" ? (
-            <p className="text-center py-8 text-green-600 font-medium">Ya conectado</p>
-          ) : qrModal.status === "not_created" ? (
-            <div className="text-center py-6 space-y-3">
-              <p className="text-red-600 font-medium">Instancia no existe en Evolution API</p>
-              <p className="text-xs text-gray-400 font-mono">{qrModal.instanceName}</p>
-              <button
-                onClick={() => createInstance(qrModal.clientId, qrModal.instanceName)}
-                className="w-full bg-black text-white text-sm px-4 py-2.5 rounded-lg font-medium"
-              >
-                Crear instancia ahora
-              </button>
-              {qrModal.detail && <p className="text-xs text-gray-400">{qrModal.detail}</p>}
-            </div>
-          ) : (
-            <p className="text-center py-8 text-gray-500">
-              Estado: <strong>{qrModal.status}</strong>
-              {qrModal.detail && <span className="block text-xs text-red-500 mt-1">{qrModal.detail}</span>}
-            </p>
-          )}
-          {!["loading", "creating", "not_created", "open"].includes(qrModal.status) && (
-            <button onClick={() => showQR({ id: qrModal.clientId, instance_name: qrModal.instanceName } as Client)} className="w-full mt-4 border rounded-lg py-2 text-sm hover:bg-gray-50">
-              Actualizar QR
-            </button>
-          )}
-        </Modal>
+        <QRModal
+          qrModal={qrModal}
+          onClose={() => setQrModal(null)}
+          onRefresh={(instanceName) => showQR({ id: qrModal.clientId, instance_name: instanceName } as Client)}
+          onCreateInstance={createInstance}
+        />
       )}
 
       {knowledgeModal && (
-        <KnowledgeModal client={knowledgeModal} onClose={() => setKnowledgeModal(null)} />
+        <KnowledgeModal client={knowledgeModal} token={token} onClose={() => setKnowledgeModal(null)} />
       )}
 
       {editModal && (
-        <EditClientModal client={editModal} onClose={() => setEditModal(null)} onSaved={loadClients} />
+        <EditClientModal client={editModal} token={token} onClose={() => setEditModal(null)} onSaved={loadClients} />
       )}
 
-      {showForm && <NewClientForm onClose={() => setShowForm(false)} onCreated={loadClients} />}
+      {catalogModal && (
+        <CatalogScriptModal client={catalogModal} onClose={() => setCatalogModal(null)} />
+      )}
+
+      {showForm && <NewClientForm token={token} onClose={() => setShowForm(false)} onCreated={loadClients} />}
     </div>
   );
 }
@@ -411,6 +435,123 @@ function ReportsSection({
   );
 }
 
+const QR_REFRESH_SECONDS = 15;
+
+function QRModal({
+  qrModal,
+  onClose,
+  onRefresh,
+  onCreateInstance,
+}: {
+  qrModal: QrModalState;
+  onClose: () => void;
+  onRefresh: (instanceName: string) => void;
+  onCreateInstance: (clientId: string, instanceName: string) => void;
+}) {
+  const [countdown, setCountdown] = useState(QR_REFRESH_SECONDS);
+  const showingQr = !!qrModal.qr && !["loading", "creating", "not_created", "open"].includes(qrModal.status);
+
+  useEffect(() => {
+    if (!showingQr) return;
+    setCountdown(QR_REFRESH_SECONDS);
+
+    const tick = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          onRefresh(qrModal.instanceName);
+          return QR_REFRESH_SECONDS;
+        }
+        return c - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(tick);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qrModal.qr]);
+
+  return (
+    <Modal onClose={onClose} title="Conectar WhatsApp">
+      {qrModal.status === "loading" ? (
+        <p className="text-center py-8 text-gray-500">Verificando instancia...</p>
+      ) : qrModal.status === "creating" ? (
+        <p className="text-center py-8 text-gray-500">Creando instancia en Evolution API...</p>
+      ) : qrModal.qr ? (
+        <div className="text-center">
+          <p className="text-sm text-gray-600 mb-3">
+            Escanea desde WhatsApp del cliente — se actualiza en{" "}
+            <span className={`font-semibold ${countdown <= 5 ? "text-red-500" : "text-gray-700"}`}>
+              {countdown}s
+            </span>
+          </p>
+          <img src={qrModal.qr} alt="QR WhatsApp" className="mx-auto w-64 h-64 rounded-lg" />
+        </div>
+      ) : qrModal.status === "open" ? (
+        <p className="text-center py-8 text-green-600 font-medium">✅ Ya conectado</p>
+      ) : qrModal.status === "not_created" ? (
+        <div className="text-center py-6 space-y-3">
+          <p className="text-red-600 font-medium">Instancia no existe en Evolution API</p>
+          <p className="text-xs text-gray-400 font-mono">{qrModal.instanceName}</p>
+          <button
+            onClick={() => onCreateInstance(qrModal.clientId, qrModal.instanceName)}
+            className="w-full bg-black text-white text-sm px-4 py-2.5 rounded-lg font-medium"
+          >
+            Crear instancia ahora
+          </button>
+          {qrModal.detail && <p className="text-xs text-gray-400">{qrModal.detail}</p>}
+        </div>
+      ) : (
+        <p className="text-center py-8 text-gray-500">
+          Estado: <strong>{qrModal.status}</strong>
+          {qrModal.detail && <span className="block text-xs text-red-500 mt-1">{qrModal.detail}</span>}
+        </p>
+      )}
+      {!["loading", "creating", "not_created", "open"].includes(qrModal.status) && !qrModal.qr && (
+        <button
+          onClick={() => onRefresh(qrModal.instanceName)}
+          className="w-full mt-4 border rounded-lg py-2 text-sm hover:bg-gray-50"
+        >
+          Actualizar QR
+        </button>
+      )}
+    </Modal>
+  );
+}
+
+function CatalogScriptModal({ client, onClose }: { client: Client; onClose: () => void }) {
+  const appUrl =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://ferova-whatsapp-ai.vercel.app";
+  const snippet = `<script\n  src="${appUrl}/ferova-catalog.js"\n  data-client-id="${client.id}"\n  data-endpoint="${appUrl}/api/catalog/sync"\n  async\n></script>`;
+
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(snippet);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <Modal onClose={onClose} title={`Script catálogo — ${client.business_name}`}>
+      <p className="text-sm text-gray-600 mb-3">
+        Pega este código en el <code className="bg-gray-100 px-1 rounded">&lt;head&gt;</code> o antes del cierre de <code className="bg-gray-100 px-1 rounded">&lt;body&gt;</code> en cada página de producto de la tienda del cliente.
+      </p>
+      <pre className="bg-gray-900 text-green-400 text-xs rounded-xl p-4 overflow-x-auto whitespace-pre-wrap break-all">
+        {snippet}
+      </pre>
+      <button
+        onClick={copy}
+        className="mt-3 w-full bg-black text-white rounded-lg py-2.5 text-sm font-medium"
+      >
+        {copied ? "✓ Copiado" : "Copiar código"}
+      </button>
+      <p className="text-xs text-gray-400 mt-3">
+        Compatible con Shopify, WordPress/WooCommerce, Wix, Tiendanube, Lovable y cualquier web con JSON-LD o Open Graph.
+      </p>
+    </Modal>
+  );
+}
+
 function Modal({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -425,7 +566,7 @@ function Modal({ children, onClose, title }: { children: React.ReactNode; onClos
   );
 }
 
-function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => void }) {
+function KnowledgeModal({ client, token, onClose }: { client: Client; token: string; onClose: () => void }) {
   const [url, setUrl] = useState("");
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -437,7 +578,7 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
     setResult("");
     const res = await fetch("/api/knowledge", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify({
         client_id: client.id,
         url: type === "url" ? url : undefined,
@@ -458,7 +599,7 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
     formData.append("client_id", client.id);
     const res = await fetch("/api/knowledge/file", {
       method: "POST",
-      headers: fileAuthHeaders(),
+      headers: fileAuthHeaders(token),
       body: formData,
     });
     const data = await res.json();
@@ -471,7 +612,7 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
     setLoading(true);
     await fetch("/api/knowledge", {
       method: "DELETE",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify({ client_id: client.id }),
     });
     setResult("🗑️ Base de conocimiento eliminada");
@@ -533,7 +674,7 @@ function KnowledgeModal({ client, onClose }: { client: Client; onClose: () => vo
   );
 }
 
-function EditClientModal({ client, onClose, onSaved }: { client: Client; onClose: () => void; onSaved: () => void }) {
+function EditClientModal({ client, token, onClose, onSaved }: { client: Client; token: string; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({
     name: client.name || "",
     business_name: client.business_name || "",
@@ -551,7 +692,7 @@ function EditClientModal({ client, onClose, onSaved }: { client: Client; onClose
     setError("");
     const res = await fetch(`/api/clients/${client.id}`, {
       method: "PATCH",
-      headers: authHeaders(),
+      headers: authHeaders(token),
       body: JSON.stringify(form),
     });
     if (res.ok) {
@@ -603,7 +744,7 @@ function EditClientModal({ client, onClose, onSaved }: { client: Client; onClose
   );
 }
 
-function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function NewClientForm({ token, onClose, onCreated }: { token: string; onClose: () => void; onCreated: () => void }) {
   const [form, setForm] = useState({
     name: "",
     business_name: "",
@@ -625,7 +766,7 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
     try {
       const res = await fetch("/api/clients", {
         method: "POST",
-        headers: authHeaders(),
+        headers: authHeaders(token),
         body: JSON.stringify({
           name: form.name,
           business_name: form.business_name,
@@ -655,7 +796,7 @@ function NewClientForm({ onClose, onCreated }: { onClose: () => void; onCreated:
       if (form.website_url && (data as {id?: string}).id) {
         fetch("/api/knowledge", {
           method: "POST",
-          headers: authHeaders(),
+          headers: authHeaders(token),
           body: JSON.stringify({ client_id: (data as {id: string}).id, url: form.website_url, source: form.website_url }),
         }).catch(() => {});
       }

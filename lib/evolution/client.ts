@@ -34,6 +34,27 @@ export async function sendMessage(instanceName: string, to: string, text: string
   return res.json();
 }
 
+export async function sendMedia(
+  instanceName: string,
+  to: string,
+  mediaUrl: string,
+  caption: string,
+) {
+  const res = await fetch(`${BASE_URL}/message/sendMedia/${instanceName}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      number: to,
+      mediaMessage: {
+        mediatype: "image",
+        caption,
+        media: mediaUrl,
+      },
+    }),
+  });
+  return res.json();
+}
+
 export async function getMediaBase64(instanceName: string, message: unknown) {
   const res = await fetch(`${BASE_URL}/chat/getBase64FromMediaMessage/${instanceName}`, {
     method: "POST",

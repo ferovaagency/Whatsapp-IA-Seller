@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/client";
 import { getProvider } from "@/lib/ai/provider";
 import { searchKnowledge } from "@/lib/knowledge/search";
-import { sendMessage } from "@/lib/evolution/client";
+import { sendMessage, sendMedia } from "@/lib/evolution/client";
+import { clientHasCatalog } from "@/lib/catalog/search";
+import type { CatalogProduct } from "@/lib/catalog/search";
+import { generateWithCatalog } from "@/lib/catalog/tool";
 
-const HUMAN_SILENCE_MINUTES = 15;
+const HUMAN_SILENCE_MINUTES = 30;
 
 function extractText(msg: any): string {
   return (
@@ -58,9 +61,11 @@ export async function POST(req: NextRequest) {
   if (event !== "messages.upsert") return NextResponse.json({ ok: true });
   if (!msg) return NextResponse.json({ ok: true });
 
-  // ── Comandos del dueño ───────────────────────────────────────────────────────
+  // ── Mensajes del dueño ───────────────────────────────────────────────────────
   if (fromMe) {
+    const remoteJid = msg.key?.remoteJid ?? "";
     const cmd = normalizeCmd(messageText);
+
     if (cmd === "activar bot" || cmd === "apagar bot") {
       const { data: owner } = await supabaseAdmin
         .from("clients")
@@ -71,7 +76,6 @@ export async function POST(req: NextRequest) {
       if (owner) {
         const enable = cmd === "activar bot";
         await supabaseAdmin.from("clients").update({ bot_enabled: enable }).eq("id", owner.id);
-        const remoteJid = msg.key?.remoteJid ?? "";
         if (remoteJid) {
           await sendMessage(instanceName, remoteJid,
             enable
@@ -81,7 +85,25 @@ export async function POST(req: NextRequest) {
         }
         console.log("[webhook] bot toggled:", { enable, instance: instanceName });
       }
+    } else if (messageText && remoteJid && !remoteJid.endsWith("@g.us")) {
+      // El dueño respondió manualmente a un cliente → pausar el bot 30 min para esa conversación
+      const customerNumber = remoteJid.replace("@s.whatsapp.net", "");
+      const { data: owner } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("instance_name", instanceName)
+        .single();
+
+      if (owner) {
+        await supabaseAdmin
+          .from("conversations")
+          .update({ last_human_reply_at: new Date().toISOString() })
+          .eq("client_id", owner.id)
+          .eq("whatsapp_number", customerNumber);
+        console.log("[webhook] human reply detected, bot paused 30min:", { instanceName, customerNumber });
+      }
     }
+
     return NextResponse.json({ ok: true });
   }
 
@@ -165,14 +187,42 @@ export async function POST(req: NextRequest) {
     try {
       knowledge = await searchKnowledge(client.id, messageText);
     } catch {
-      // Continúa sin RAG si Gemini no está disponible
+      // Continúa sin RAG si no está disponible
     }
 
     const systemPrompt = buildSystemPrompt(client, knowledge);
-    const ai = await getProvider();
-    const reply = await ai.generateResponse(messages, systemPrompt);
+    const hasCatalog = await clientHasCatalog(client.id);
+    const isClaudeProvider =
+      (process.env.AI_PROVIDER || "gemini").trim() === "claude" && process.env.ANTHROPIC_API_KEY;
 
-    await sendMessage(instanceName, fromNumber + "@s.whatsapp.net", reply);
+    let reply: string;
+    let productToSend: CatalogProduct | null = null;
+
+    if (hasCatalog && isClaudeProvider) {
+      const result = await generateWithCatalog(client.id, messages, systemPrompt);
+      reply = result.text;
+      productToSend = result.product;
+    } else {
+      const ai = await getProvider();
+      reply = await ai.generateResponse(messages, systemPrompt);
+    }
+
+    const recipientJid = fromNumber + "@s.whatsapp.net";
+    await sendMessage(instanceName, recipientJid, reply);
+
+    // Send product card if catalog search returned a result with an image
+    if (productToSend && productToSend.imagen_url) {
+      const caption =
+        `*🛍️ ¡Te recomiendo este producto!*\n\n` +
+        `*📌 ${productToSend.nombre}*\n` +
+        (productToSend.precio ? `*💰 Precio:* ${productToSend.precio}\n` : "") +
+        `\n🔗 *Ver en la web:* ${productToSend.url_producto}`;
+      try {
+        await sendMedia(instanceName, recipientJid, productToSend.imagen_url, caption);
+      } catch (mediaErr) {
+        console.warn("[webhook] sendMedia failed:", mediaErr);
+      }
+    }
 
     await supabaseAdmin.from("messages").insert({
       conversation_id: conversation.id,
@@ -180,7 +230,7 @@ export async function POST(req: NextRequest) {
       content: reply,
     });
 
-    console.log("[webhook] replied OK", { instanceName, fromNumber, chars: reply.length });
+    console.log("[webhook] replied OK", { instanceName, fromNumber, chars: reply.length, hasCatalog, sentProduct: !!productToSend });
   } catch (err) {
     console.error("[webhook] reply error:", err);
   }

@@ -118,6 +118,23 @@ export default function ClientPortal() {
 }
 
 function BotSection({ client, onToggle }: { client: ClientData; onToggle: () => void }) {
+  const { clientId } = useParams<{ clientId: string }>();
+  const [prompt, setPrompt] = useState(client.custom_prompt ?? "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  async function savePrompt() {
+    setSaving(true);
+    await fetch(`/api/portal/${clientId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ custom_prompt: prompt.trim() || null }),
+    });
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  }
+
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-2xl p-6 border">
@@ -138,6 +155,29 @@ function BotSection({ client, onToggle }: { client: ClientData; onToggle: () => 
         <div className={`mt-4 px-4 py-3 rounded-xl text-sm font-medium ${client.bot_enabled ? "bg-green-50 text-green-700" : "bg-yellow-50 text-yellow-700"}`}>
           {client.bot_enabled ? "Tu bot está activo y atendiendo clientes." : "Tu bot está pausado. Actívalo cuando quieras retomar la atención automática."}
         </div>
+      </div>
+
+      <div className="bg-white rounded-2xl p-5 border space-y-3">
+        <div>
+          <h3 className="font-semibold text-sm">Instrucciones del bot</h3>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Describe cómo debe comportarse, qué vende y cómo debe hablar con tus clientes.
+          </p>
+        </div>
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          rows={6}
+          placeholder={`Ej: Eres el asistente de ${client.business_name}. Ayuda a los clientes con preguntas sobre productos, precios y disponibilidad. Responde siempre en español, con tono amable y profesional.`}
+          className="w-full border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-black"
+        />
+        <button
+          onClick={savePrompt}
+          disabled={saving}
+          className="w-full bg-black text-white py-2.5 rounded-xl text-sm font-medium disabled:opacity-40"
+        >
+          {saving ? "Guardando..." : saved ? "✓ Guardado" : "Guardar instrucciones"}
+        </button>
       </div>
 
       <div className="bg-white rounded-2xl p-5 border">
